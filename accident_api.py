@@ -1,6 +1,6 @@
 """
 🚗 نظام تقييم حوادث السيارات بالذكاء الاصطناعي
-Backend API كامل مع Gemini Vision AI - نسخة متقدمة
+Backend API كامل مع Gemini Vision AI - يدعم الصور والفيديو
 """
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -15,6 +15,8 @@ from datetime import datetime
 import os
 import sys
 from dotenv import load_dotenv
+import tempfile
+import mimetypes
 
 # تحميل متغيرات البيئة من ملف .env
 load_dotenv()
@@ -52,11 +54,12 @@ class CameraRequest(BaseModel):
 class AnalysisResponse(BaseModel):
     incident_id: str
     timestamp: str
+    media_type: str  # "image" أو "video"
     
     # تحليل الحادث
     severity_level: str
     severity_score: int
-    accident_type: str  # نوع الحادث: تصادم أمامي، جانبي، انقلاب، إلخ
+    accident_type: str
     
     # كيف حصل الحادث
     accident_description: str
@@ -89,8 +92,8 @@ class AnalysisResponse(BaseModel):
 
 app = FastAPI(
     title="نظام تقييم حوادث السيارات المتقدم",
-    description="تحليل شامل لحوادث السيارات مع تحديد المسؤولية والإجراءات",
-    version="3.0.0"
+    description="تحليل شامل لحوادث السيارات مع تحديد المسؤولية والإجراءات - يدعم الصور والفيديو",
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -118,20 +121,19 @@ else:
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# أنواع الملفات المدعومة
+SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+SUPPORTED_VIDEO_TYPES = ["video/mp4", "video/mpeg", "video/mov", "video/avi", "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp"]
+
 # ================================
 # 🧠 وظيفة التحليل بـ Gemini Vision
 # ================================
 
 def analyze_accident_image(image_data: bytes) -> dict:
-    """
-    تحليل شامل لصورة الحادث
-    """
+    """تحليل شامل لصورة الحادث"""
     
     if not GEMINI_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Gemini API Key not configured"
-        )
+        raise HTTPException(status_code=500, detail="Gemini API Key not configured")
     
     try:
         image = Image.open(BytesIO(image_data))
@@ -141,7 +143,101 @@ def analyze_accident_image(image_data: bytes) -> dict:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read image: {str(e)}")
 
-    prompt = """أنت خبير في تحليل حوادث السيارات وتحديد المسؤولية. حلل هذه الصورة بدقة شديدة.
+    prompt = get_analysis_prompt()
+
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            [prompt, image],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                top_p=0.8,
+                top_k=32,
+            )
+        )
+        
+        return parse_gemini_response(response.text)
+        
+    except Exception as e:
+        print(f"Analysis Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+
+def analyze_accident_video(video_data: bytes, filename: str) -> dict:
+    """تحليل شامل لفيديو الحادث"""
+    
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="Gemini API Key not configured")
+    
+    # حفظ الفيديو مؤقتاً
+    temp_file = None
+    try:
+        # إنشاء ملف مؤقت
+        suffix = os.path.splitext(filename)[1]
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_file.write(video_data)
+        temp_file.close()
+        
+        print(f"📹 رفع الفيديو إلى Gemini...")
+        
+        # رفع الفيديو
+        video_file = genai.upload_file(path=temp_file.name)
+        print(f"✅ تم رفع الفيديو: {video_file.name}")
+        
+        # انتظار المعالجة
+        import time
+        while video_file.state.name == "PROCESSING":
+            print("⏳ جاري معالجة الفيديو...")
+            time.sleep(2)
+            video_file = genai.get_file(video_file.name)
+        
+        if video_file.state.name == "FAILED":
+            raise Exception("فشلت معالجة الفيديو")
+        
+        print("🎬 بدء التحليل...")
+        
+        prompt = get_analysis_prompt() + """
+        
+        ملاحظة: هذا فيديو وليس صورة. حلل الفيديو بالكامل:
+        - راقب تسلسل الأحداث من البداية للنهاية
+        - حدد اللحظة الدقيقة للاصطدام
+        - تتبع حركة المركبات قبل وأثناء وبعد الحادث
+        - لاحظ سرعة المركبات
+        - راقب أي إشارات مرورية أو علامات طريق
+        - حدد أي سلوكيات خاطئة من السائقين
+        """
+        
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            [prompt, video_file],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                top_p=0.8,
+                top_k=32,
+            )
+        )
+        
+        # حذف الملف من Gemini
+        genai.delete_file(video_file.name)
+        print("🗑️ تم حذف الفيديو من الخادم")
+        
+        return parse_gemini_response(response.text)
+        
+    except Exception as e:
+        print(f"Video Analysis Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"خطأ في تحليل الفيديو: {str(e)}")
+    finally:
+        # حذف الملف المؤقت
+        if temp_file and os.path.exists(temp_file.name):
+            try:
+                os.unlink(temp_file.name)
+            except:
+                pass
+
+
+def get_analysis_prompt() -> str:
+    """البرومبت الموحد للتحليل"""
+    return """أنت خبير في تحليل حوادث السيارات وتحديد المسؤولية. حلل هذا الحادث بدقة شديدة.
 
     أرجع JSON كامل يحتوي على:
 
@@ -156,7 +252,7 @@ def analyze_accident_image(image_data: bytes) -> dict:
         
         "fault_party_a_percentage": <نسبة خطأ السائق A من 0-100>,
         "fault_party_b_percentage": <نسبة خطأ السائق B من 0-100>,
-        "fault_explanation": "<شرح مفصل: لماذا هذه النسب؟ على أي أساس؟ ما الأدلة من الصورة؟>",
+        "fault_explanation": "<شرح مفصل: لماذا هذه النسب؟ على أي أساس؟ ما الأدلة؟>",
         
         "damage_description": "<وصف الأضرار بالتفصيل>",
         "damaged_parts": ["<قائمة الأجزاء المتضررة>"],
@@ -187,39 +283,28 @@ def analyze_accident_image(image_data: bytes) -> dict:
     
     أرجع JSON فقط بدون نص إضافي."""
 
+
+def parse_gemini_response(response_text: str) -> dict:
+    """تحليل استجابة Gemini"""
+    response_text = response_text.strip()
+    
+    # تنظيف markdown
+    if response_text.startswith("```json"):
+        response_text = response_text[7:]
+    elif response_text.startswith("```"):
+        response_text = response_text[3:]
+    if response_text.endswith("```"):
+        response_text = response_text[:-3]
+    
+    response_text = response_text.strip()
+    
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(
-            [prompt, image],
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.3,
-                top_p=0.8,
-                top_k=32,
-            )
-        )
-        
-        response_text = response.text.strip()
-        
-        # تنظيف markdown
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        elif response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        response_text = response_text.strip()
-        analysis_result = json.loads(response_text)
-        
-        return analysis_result
-        
+        return json.loads(response_text)
     except json.JSONDecodeError as e:
         print(f"JSON Error: {e}")
         print(f"Response: {response_text[:500]}")
         raise HTTPException(status_code=500, detail="Failed to parse Gemini response")
-    except Exception as e:
-        print(f"Analysis Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
 
 # ================================
 # 🎯 تحديد الإجراءات والجهات
@@ -290,17 +375,21 @@ def generate_recommended_action(severity_score: int, injuries: bool, cameras_nee
 async def root():
     return {
         "message": "🚗 نظام تقييم حوادث السيارات المتقدم",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "status": "✅ النظام يعمل",
         "features": [
-            "تحليل شامل للحادث",
+            "تحليل شامل للحادث (صور وفيديو)",
             "تحديد نسب المسؤولية",
             "كشف كيفية حدوث الحادث",
             "تحويل تلقائي لنجم/أبشر",
             "طلب كاميرات المراقبة",
             "تقييم الأضرار والتكاليف"
         ],
-        "ai_model": GEMINI_MODEL
+        "ai_model": GEMINI_MODEL,
+        "supported_media": {
+            "images": SUPPORTED_IMAGE_TYPES,
+            "videos": SUPPORTED_VIDEO_TYPES
+        }
     }
 
 @app.get("/health")
@@ -315,29 +404,56 @@ async def health_check():
 
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_accident(
-    file: UploadFile = File(..., description="صورة الحادث"),
+    file: UploadFile = File(..., description="صورة أو فيديو الحادث"),
     latitude: Optional[float] = Form(None, description="خط العرض"),
     longitude: Optional[float] = Form(None, description="خط الطول")
 ):
     """
-    🎯 تحليل شامل لحادث السيارة
+    🎯 تحليل شامل لحادث السيارة (صور وفيديو)
     """
     
-    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="نوع الملف غير مدعوم")
+    # التحقق من نوع الملف عن طريق الامتداد والـ content_type
+    filename = file.filename.lower()
+    content_type = file.content_type
     
-    max_size = 10 * 1024 * 1024
+    # امتدادات الصور
+    image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
+    # امتدادات الفيديو
+    video_extensions = ['.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp']
+    
+    # تحديد النوع
+    is_image = (content_type in SUPPORTED_IMAGE_TYPES) or any(filename.endswith(ext) for ext in image_extensions)
+    is_video = (content_type in SUPPORTED_VIDEO_TYPES) or any(filename.endswith(ext) for ext in video_extensions)
+    
+    print(f"📄 اسم الملف: {file.filename}")
+    print(f"📋 Content-Type: {content_type}")
+    print(f"🖼️ صورة: {is_image} | 🎬 فيديو: {is_video}")
+    
+    if not (is_image or is_video):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"نوع الملف غير مدعوم. الملف: {file.filename}, النوع: {content_type}. الأنواع المدعومة: صور (jpg, png, webp) أو فيديو (mp4, mov, avi)"
+        )
+    
+    max_size = 100 * 1024 * 1024 if is_video else 10 * 1024 * 1024  # 100MB للفيديو، 10MB للصورة
     
     try:
-        image_data = await file.read()
+        file_data = await file.read()
         
-        if len(image_data) > max_size:
-            raise HTTPException(status_code=400, detail="حجم الملف كبير جداً")
+        if len(file_data) > max_size:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"حجم الملف كبير جداً. الحد الأقصى: {max_size/(1024*1024):.0f}MB"
+            )
         
         # التحليل بالذكاء الاصطناعي
-        print(f"🔍 بدء التحليل الشامل: {file.filename}")
-        ai_analysis = analyze_accident_image(image_data)
+        media_type = "video" if is_video else "image"
+        print(f"🔍 بدء تحليل {media_type}: {file.filename}")
+        
+        if is_video:
+            ai_analysis = analyze_accident_video(file_data, file.filename)
+        else:
+            ai_analysis = analyze_accident_image(file_data)
         
         # معرف الحادث
         incident_id = f"ACC-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -396,6 +512,7 @@ async def analyze_accident(
         result = AnalysisResponse(
             incident_id=incident_id,
             timestamp=datetime.now().isoformat(),
+            media_type=media_type,
             severity_level=severity_level,
             severity_score=severity_score,
             accident_type=ai_analysis.get("accident_type", "غير محدد"),
@@ -417,6 +534,7 @@ async def analyze_accident(
         )
         
         print(f"✅ تم التحليل بنجاح - {incident_id}")
+        print(f"📊 النوع: {media_type}")
         print(f"📊 الخطورة: {severity_score}/100")
         print(f"⚖️ نسب الخطأ: A={fault_assessment.party_a}% | B={fault_assessment.party_b}%")
         print(f"🚨 الجهة: {emergency_response.service_needed}")
