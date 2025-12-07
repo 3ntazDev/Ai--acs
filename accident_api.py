@@ -20,9 +20,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # إصلاح مشكلة encoding في Windows
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
+try:
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+except:
+    pass
 
 # ================================
 # 📊 نماذج البيانات
@@ -431,20 +434,6 @@ async def analyze_accident(
 # 🏃‍♂️ تشغيل التطبيق
 # ================================
 
-# For Vercel
-handler = app
-
 if __name__ == "__main__":
     import uvicorn
-    
-    print("=" * 70)
-    print("🚀 نظام تقييم حوادث السيارات المتقدم")
-    print("=" * 70)
-    print(f"🤖 AI Model: {GEMINI_MODEL}")
-    print(f"🔑 API Key: {'✅ مُكوّن' if GEMINI_API_KEY else '❌ غير مُكوّن'}")
-    print("=" * 70)
-    print("📡 API: http://127.0.0.1:8000")
-    print("📖 التوثيق: http://127.0.0.1:8000/docs")
-    print("=" * 70)
-    
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
