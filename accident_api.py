@@ -431,6 +431,9 @@ async def analyze_accident(
 # 🏃‍♂️ تشغيل التطبيق
 # ================================
 
+# For Vercel
+handler = app
+
 if __name__ == "__main__":
     import uvicorn
     
